@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>wattson</vendor>
+
+  <!-- Translations are added as extra <description> and <message> elements
+       carrying xml:lang="xx", using the same language codes as the message
+       catalogs in src/wattson/locales. -->
+  <action id="com.yura.wattson.manage">
+    <description>Manage fan curve and battery charge limit</description>
+    <message>Authentication is required to change fan and battery settings</message>
+    <icon_name>applications-system</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/wattson</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>

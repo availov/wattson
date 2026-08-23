@@ -1,0 +1,8 @@
+[Unit]
+Description=Wattson: ASUS fan curve and battery charge limit
+Documentation=man:wattson
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wattson apply --from-config --quiet

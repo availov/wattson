@@ -1,0 +1,13 @@
+[Desktop Entry]
+# Translations go into Name[xx], Comment[xx] and Keywords[xx] entries,
+# where xx is the language code — the same codes the message catalogs in
+# src/wattson/locales use.
+Type=Application
+Name=Wattson
+Comment=Fan curve, battery charge limit and power consumption audit
+Exec=wattson gui
+Icon=applications-system
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=fan;asus;cooling;battery;charge;power;watt;
+StartupNotify=true

@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-apply fan curve and charge limit after boot, resume and power-profile switch
+
+[Timer]
+OnBootSec=15
+OnUnitActiveSec=30
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
