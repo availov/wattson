@@ -1,7 +1,12 @@
 # Wattson
 
-Fan curve, battery charge limit and a power-drain audit for Linux laptops.
-One GTK4 window plus a command line.
+Fan curve, battery charge limit, power-drain audit and network traffic per
+application — for Linux laptops. One GTK4 window plus a command line.
+
+**Fan control works on ASUS only** — it is built on the
+`asus_custom_fan_curve` driver, and no other vendor exposes a fan curve
+this way. Everything else works on any laptop, and on a non-ASUS machine
+the Fans tab is simply greyed out.
 
 ## Install
 
@@ -23,13 +28,14 @@ changing the sources; it rebuilds the binary every time.
 
 ## Use
 
-Run `wattson`, or find Wattson in the application menu. Three tabs:
+Run `wattson`, or find Wattson in the application menu. Four tabs:
 
 | Tab | What you get | Works on |
 |---|---|---|
 | **Fans** | minimum fan speed and all 8 curve points, live temperature and rpm | ASUS only (`asus_custom_fan_curve` driver) |
 | **Battery** | stop charging at 80 %, plus charge, wear, watts, volts | any laptop with `charge_control_end_threshold` |
 | **Power draw** | what drains the battery right now, and what to do about it | any machine |
+| **Network** | speed per interface, and how much each application moves right now and since start | any machine |
 
 A tab whose hardware is missing is greyed out with an explanation, the rest
 keeps working. To check the charge limit on your laptop:
@@ -48,6 +54,7 @@ the kernel drops them at every one of those.
 wattson                   the window
 wattson status            mode, temperature, rpm, battery, curve
 wattson power             what eats the battery (with sudo: exact CPU watts)
+wattson net               network speed and traffic per application
 wattson battery set 80    stop charging at 80 %
 wattson battery off       charge up to 100 % again
 wattson apply --floor 10  never let the fan drop below 10 %
@@ -56,7 +63,7 @@ wattson autostart on|off|status
 wattson config show|init
 ```
 
-`status`, `battery` and `power` also take `--json` for scripts. Anything
+`status`, `battery`, `power` and `net` also take `--json` for scripts. Anything
 that needs root raises its privileges through pkexec on its own. Settings
 live in `/etc/wattson.json`.
 
@@ -80,5 +87,8 @@ It removes everything and puts back the factory fan curve and charging to
   `Not charging` — that is normal behaviour, not a fault.
 - The power tab lists problems only, so an empty table means there is
   nothing to fix.
+- Traffic per application is counted from TCP sockets, so QUIC (HTTP/3)
+  does not show up next to a program, and other users' programs need
+  `sudo wattson net`. Interface speed is exact either way.
 - Coming from `asus-fan-control`: the installer migrates the settings and
   removes the old version by itself.

@@ -19,7 +19,7 @@ gi.require_version('Gtk', '4.0')
 
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import __version__, core, i18n, power  # noqa: E402
+from . import __version__, core, i18n, network, power  # noqa: E402
 from .i18n import translate  # noqa: E402
 
 REFRESH_SECONDS = 2
@@ -44,15 +44,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self._fan_labels: dict[str, Gtk.Label] = {}
         self._applied_threshold: int | None = None
         self._analysis_running = False
+        self._network_running = False
         self._closing = False           # set while the window is being replaced
         self._supported = core.supported()
         self._battery_supported = core.battery_supported()
+        # the monitor belongs to the application, so its totals survive a
+        # language switch, which builds the window anew
+        self._network = application.network
 
         notebook = Gtk.Notebook()
         notebook.set_vexpand(True)
         notebook.append_page(self._build_fan_tab(), Gtk.Label(label=translate('Fans')))
         notebook.append_page(self._build_battery_tab(), Gtk.Label(label=translate('Battery')))
         notebook.append_page(self._build_power_tab(), Gtk.Label(label=translate('Power draw')))
+        notebook.append_page(self._build_network_tab(), Gtk.Label(label=translate('Network')))
         notebook.set_action_widget(self._build_language(), Gtk.PackType.END)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -63,6 +68,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._load_initial()
         self._refresh_live()
         self._refresh_battery()
+        self._refresh_network()
         self._refresh_autostart()
         self._set_sensitive(True)
 
@@ -352,11 +358,7 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self._power_notes.set_visible(False)
 
-        child = self._power_table.get_first_child()
-        while child is not None:
-            following = child.get_next_sibling()
-            self._power_table.remove(child)
-            child = following
+        self._clear(self._power_table)
 
         if not report.findings:
             self._power_table.append(self._hint(translate(
@@ -364,16 +366,8 @@ class MainWindow(Gtk.ApplicationWindow):
             )))
             return
 
-        grid = Gtk.Grid()
-        grid.set_row_spacing(4)
-        grid.set_column_spacing(16)
-
-        titles = (translate('Source'), translate('Contribution'), translate('State'))
-        for column, title in enumerate(titles):
-            header = Gtk.Label(xalign=0)
-            header.set_markup(f"<span foreground='{HINT_COLOR}'>{title}</span>")
-            grid.attach(header, column, 0, 1, 1)
-
+        grid = self._table_grid((translate('Source'), translate('Contribution'),
+                                 translate('State')))
         row = 1
         for finding in report.findings:
             name = Gtk.Label(xalign=0, wrap=True, max_width_chars=30)
@@ -404,6 +398,71 @@ class MainWindow(Gtk.ApplicationWindow):
             row += 2
 
         self._power_table.append(grid)
+
+    # ------------------------------------------------------------------
+    # layout: network
+    # ------------------------------------------------------------------
+
+    def _build_network_tab(self) -> Gtk.Widget:
+        scroller = self._scroller()
+        content = self._page()
+
+        self._network_live = self._section()
+        content.append(self._frame(translate('Right now'), self._network_live))
+
+        self._network_apps = self._section()
+        content.append(self._frame(translate('Applications'), self._network_apps))
+
+        content.append(self._hint(translate(
+            'Per-application traffic is counted from TCP sockets: QUIC (HTTP/3) has '
+            'no counters in the kernel and stays invisible, and programs of other '
+            'users need root — "sudo wattson net" shows them all.'
+        )))
+        scroller.set_child(content)
+        return scroller
+
+    def _render_network(self, snapshot: network.Snapshot) -> None:
+        self._clear(self._network_live)
+        grid = self._table_grid((translate('Interface'), translate('Speed ↓'),
+                                 translate('Speed ↑'), translate('Total ↓'),
+                                 translate('Total ↑')))
+        self._table_row(grid, 1, (
+            translate('All traffic'),
+            network.format_rate(snapshot.rx_rate),
+            network.format_rate(snapshot.tx_rate),
+            network.format_bytes(snapshot.rx_bytes),
+            network.format_bytes(snapshot.tx_bytes),
+        ), bold=True)
+        for row, interface in enumerate(snapshot.visible_interfaces(), start=2):
+            self._table_row(grid, row, (
+                interface.name,
+                network.format_rate(interface.rx_rate),
+                network.format_rate(interface.tx_rate),
+                network.format_bytes(interface.rx_bytes),
+                network.format_bytes(interface.tx_bytes),
+            ))
+        self._network_live.append(grid)
+
+        self._clear(self._network_apps)
+        if not snapshot.applications:
+            self._network_apps.append(self._hint(
+                translate('ss from iproute2 is missing — traffic per application '
+                          'cannot be counted') if network.tool_missing()
+                else translate('Nothing from your applications yet')))
+            return
+        grid = self._table_grid((translate('Application'), translate('Speed ↓'),
+                                 translate('Speed ↑'), translate('Since start ↓'),
+                                 translate('Since start ↑')))
+        for row, application in enumerate(
+                snapshot.applications[:network.MAX_APPLICATION_ROWS], start=1):
+            self._table_row(grid, row, (
+                application.name,
+                network.format_rate(application.rx_rate),
+                network.format_rate(application.tx_rate),
+                network.format_bytes(application.rx_total),
+                network.format_bytes(application.tx_total),
+            ))
+        self._network_apps.append(grid)
 
     # ------------------------------------------------------------------
     # layout: the shared bottom of the window
@@ -515,6 +574,50 @@ class MainWindow(Gtk.ApplicationWindow):
         label.set_use_markup(True)
         label.set_markup('<tt>—</tt>')
         return label
+
+    @staticmethod
+    def _clear(box: Gtk.Box) -> None:
+        """Throw away the contents of a container that is redrawn on every tick."""
+        child = box.get_first_child()
+        while child is not None:
+            following = child.get_next_sibling()
+            box.remove(child)
+            child = following
+
+    @staticmethod
+    def _table_grid(titles: tuple[str, ...]) -> Gtk.Grid:
+        """Grid with a row of dimmed column titles.
+
+        :param titles: column titles, left to right.
+        """
+        grid = Gtk.Grid()
+        grid.set_row_spacing(4)
+        grid.set_column_spacing(16)
+        for column, title in enumerate(titles):
+            header = Gtk.Label(xalign=0)
+            header.set_markup(f"<span foreground='{HINT_COLOR}'>"
+                              + GLib.markup_escape_text(title) + '</span>')
+            grid.attach(header, column, 0, 1, 1)
+        return grid
+
+    @staticmethod
+    def _table_row(grid: Gtk.Grid, row: int, values: tuple[str, ...],
+                   bold: bool = False) -> None:
+        """One row of a table: a name and monospaced values after it.
+
+        :param grid: grid built by :meth:`_table_grid`.
+        :param row: row number, 1 is the first one under the titles.
+        :param values: the name followed by the values of the row.
+        :param bold: highlight the name, used for a summary row.
+        """
+        for column, value in enumerate(values):
+            label = Gtk.Label(xalign=0)
+            escaped = GLib.markup_escape_text(value)
+            if column:
+                label.set_markup(f'<tt>{escaped}</tt>')
+            else:
+                label.set_markup(f'<b>{escaped}</b>' if bold else escaped)
+            grid.attach(label, column, row, 1, 1)
 
     @staticmethod
     def _hint(text: str) -> Gtk.Label:
@@ -754,9 +857,35 @@ class MainWindow(Gtk.ApplicationWindow):
         self._tick += 1
         self._refresh_live()
         self._refresh_battery()
+        self._refresh_network()
         if self._tick % AUTOSTART_EVERY == 0:
             self._refresh_autostart()
         return True
+
+    def _refresh_network(self) -> None:
+        """Sample in a thread: ``ss`` takes tens of milliseconds, too much here.
+
+        Sampling goes on while other tabs are open, otherwise the totals
+        would have holes in them.
+        """
+        if self._network_running:
+            return
+        self._network_running = True
+
+        def worker() -> None:
+            try:
+                snapshot = self._network.sample()
+            except Exception:  # noqa: BLE001 — one bad reading must not stop the timer
+                snapshot = None
+            GLib.idle_add(self._network_done, snapshot)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _network_done(self, snapshot: network.Snapshot | None) -> bool:
+        self._network_running = False
+        if snapshot is not None and not self._closing:
+            self._render_network(snapshot)
+        return False
 
     # ------------------------------------------------------------------
     # handlers
@@ -970,6 +1099,8 @@ class MainWindow(Gtk.ApplicationWindow):
 class WattsonApplication(Gtk.Application):
     def __init__(self) -> None:
         super().__init__(application_id='com.yura.Wattson')
+        # kept here and not in the window: the totals must outlive a rebuild
+        self.network = network.Monitor()
 
     def do_activate(self) -> None:  # noqa: N802 — the name is dictated by GTK
         window = self.props.active_window

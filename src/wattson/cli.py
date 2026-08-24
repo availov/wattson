@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from . import __version__, core, i18n
 from .i18n import translate
@@ -335,6 +336,58 @@ def cmd_power(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_net(args: argparse.Namespace) -> int:
+    from . import network
+
+    monitor = network.Monitor()
+    monitor.sample()            # baseline: rates need two readings
+    time.sleep(args.seconds)
+    snapshot = monitor.sample()
+
+    if args.json:
+        print(json.dumps(snapshot.to_dict(), indent=2, ensure_ascii=False))
+        return 0
+
+    rows = [(translate('All traffic'), translate(
+        '↓ {down}   ↑ {up}',
+        down=network.format_rate(snapshot.rx_rate),
+        up=network.format_rate(snapshot.tx_rate),
+    ))]
+    for interface in snapshot.visible_interfaces():
+        rows.append((interface.name, translate(
+            '↓ {down}   ↑ {up}   ({received} / {sent} in total)',
+            down=network.format_rate(interface.rx_rate),
+            up=network.format_rate(interface.tx_rate),
+            received=network.format_bytes(interface.rx_bytes),
+            sent=network.format_bytes(interface.tx_bytes),
+        )))
+    _print_rows(rows)
+
+    if not snapshot.applications:
+        print()
+        print(translate('ss from iproute2 is missing — traffic per application cannot '
+                        'be counted.') if network.tool_missing()
+              else translate('No application moved data during the measurement.'))
+        return 0
+
+    title = translate('APPLICATION')
+    width = min(30, max([len(item.name) for item in snapshot.applications] + [len(title)]))
+    print()
+    print(f'{title:<{width}}  {translate("SPEED ↓"):>11}  {translate("SPEED ↑"):>11}'
+          f'  {translate("MOVED ↓"):>11}  {translate("MOVED ↑"):>11}')
+    for application in snapshot.applications[:network.MAX_APPLICATION_ROWS]:
+        print(f'{application.name[:width]:<{width}}  '
+              f'{network.format_rate(application.rx_rate):>11}  '
+              f'{network.format_rate(application.tx_rate):>11}  '
+              f'{network.format_bytes(application.rx_total):>11}  '
+              f'{network.format_bytes(application.tx_total):>11}')
+
+    if not core.is_root():
+        print()
+        print(translate('Only your own applications are listed — run with sudo for all.'))
+    return 0
+
+
 def _wrap(text: str, width: int) -> list[str]:
     lines, current = [], ''
     for word in text.split():
@@ -451,6 +504,13 @@ def build_parser() -> argparse.ArgumentParser:
     power_cmd.add_argument('--json', action='store_true',
                            help=translate('machine readable output'))
 
+    net = sub.add_parser('net', parents=[common],
+                         help=translate('network speed and traffic per application'))
+    net.add_argument('--seconds', type=float, default=2.0, metavar='SECONDS',
+                     help=translate('length of the measurement, 2 by default'))
+    net.add_argument('--json', action='store_true',
+                     help=translate('machine readable output'))
+
     autostart = sub.add_parser('autostart', parents=[common],
                                help=translate('control the autostart'))
     autostart.add_argument('action', choices=['on', 'off', 'status'])
@@ -490,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         'reset': cmd_reset,
         'battery': cmd_battery,
         'power': cmd_power,
+        'net': cmd_net,
         'autostart': cmd_autostart,
         'config': cmd_config,
     }
