@@ -43,6 +43,19 @@ DEFAULT_POINTS = [(30, 0), (50, 0), (60, 2), (67, 38), (73, 47), (80, 61), (88, 
 DEFAULT_BATTERY_THRESHOLD = 80
 MIN_BATTERY_THRESHOLD = 20
 
+# What closing the lid does. The first three go to logind as they are; the
+# last one is wattson's own: logind only locks the screen, and the service
+# puts the machine to sleep once the charge is down to the threshold.
+LID_SUSPEND = 'suspend'
+LID_LOCK = 'lock'
+LID_IGNORE = 'ignore'
+LID_LOW_BATTERY = 'low-battery'
+LID_BATTERY_ACTIONS = (LID_SUSPEND, LID_LOW_BATTERY, LID_LOCK, LID_IGNORE)
+LID_AC_ACTIONS = (LID_SUSPEND, LID_LOCK, LID_IGNORE)
+DEFAULT_LID_LOW_THRESHOLD = 15
+MIN_LID_LOW_THRESHOLD = 5
+MAX_LID_LOW_THRESHOLD = 50
+
 # identifiers, not display text: they travel through JSON output
 MODE_CUSTOM = 'custom'
 MODE_AUTO = 'automatic'
@@ -520,6 +533,22 @@ def reset_battery() -> bool:
 
 
 # --------------------------------------------------------------------------
+# lid: the settings only, logind itself is handled in lid.py
+# --------------------------------------------------------------------------
+
+def validate_lid_threshold(threshold: int) -> None:
+    """Check the charge at which a laptop with its lid closed goes to sleep.
+
+    :param threshold: charge in %.
+    """
+    if not MIN_LID_LOW_THRESHOLD <= threshold <= MAX_LID_LOW_THRESHOLD:
+        raise ValueError(translate(
+            'the charge to sleep at must be between {minimum} and {maximum} %',
+            minimum=MIN_LID_LOW_THRESHOLD, maximum=MAX_LID_LOW_THRESHOLD,
+        ))
+
+
+# --------------------------------------------------------------------------
 # configuration
 # --------------------------------------------------------------------------
 
@@ -532,6 +561,11 @@ class Config:
     # already installed machine charges is not acceptable
     battery_enabled: bool = False
     battery_threshold: int = DEFAULT_BATTERY_THRESHOLD
+    # the lid stays with the system defaults until it is set in wattson
+    lid_enabled: bool = False
+    lid_battery: str = LID_SUSPEND
+    lid_ac: str = LID_SUSPEND
+    lid_low_threshold: int = DEFAULT_LID_LOW_THRESHOLD
 
     def to_dict(self) -> dict:
         return {
@@ -540,6 +574,10 @@ class Config:
             'points': [[temp, pwm] for temp, pwm in self.points],
             'battery_enabled': self.battery_enabled,
             'battery_threshold': self.battery_threshold,
+            'lid_enabled': self.lid_enabled,
+            'lid_battery': self.lid_battery,
+            'lid_ac': self.lid_ac,
+            'lid_low_threshold': self.lid_low_threshold,
         }
 
 
@@ -570,6 +608,18 @@ def load_config() -> Config:
         threshold = int(raw['battery_threshold'])
         validate_battery(threshold)
         config.battery_threshold = threshold
+    except (KeyError, TypeError, ValueError):
+        pass
+    if isinstance(raw.get('lid_enabled'), bool):
+        config.lid_enabled = raw['lid_enabled']
+    if raw.get('lid_battery') in LID_BATTERY_ACTIONS:
+        config.lid_battery = raw['lid_battery']
+    if raw.get('lid_ac') in LID_AC_ACTIONS:
+        config.lid_ac = raw['lid_ac']
+    try:
+        threshold = int(raw['lid_low_threshold'])
+        validate_lid_threshold(threshold)
+        config.lid_low_threshold = threshold
     except (KeyError, TypeError, ValueError):
         pass
     return config

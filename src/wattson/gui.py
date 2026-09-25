@@ -1,7 +1,7 @@
 """Graphical interface built on GTK4.
 
-Three tabs: the fan curve, the battery charge stop threshold and an audit
-of the power consumers.
+Five tabs: the fan curve, the battery charge stop threshold, an audit of
+the power consumers, network traffic and what closing the lid does.
 
 The window runs as an ordinary user: every sysfs write goes to a separate
 process through pkexec, which is what lets the GUI live under Wayland.
@@ -19,7 +19,7 @@ gi.require_version('Gtk', '4.0')
 
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from . import __version__, core, i18n, network, power  # noqa: E402
+from . import __version__, core, i18n, lid, network, power  # noqa: E402
 from .i18n import translate  # noqa: E402
 
 REFRESH_SECONDS = 2
@@ -48,6 +48,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._closing = False           # set while the window is being replaced
         self._supported = core.supported()
         self._battery_supported = core.battery_supported()
+        self._lid_supported = lid.supported()
         # the monitor belongs to the application, so its totals survive a
         # language switch, which builds the window anew
         self._network = application.network
@@ -58,6 +59,7 @@ class MainWindow(Gtk.ApplicationWindow):
         notebook.append_page(self._build_battery_tab(), Gtk.Label(label=translate('Battery')))
         notebook.append_page(self._build_power_tab(), Gtk.Label(label=translate('Power draw')))
         notebook.append_page(self._build_network_tab(), Gtk.Label(label=translate('Network')))
+        notebook.append_page(self._build_lid_tab(), Gtk.Label(label=translate('Lid')))
         notebook.set_action_widget(self._build_language(), Gtk.PackType.END)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -70,6 +72,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._refresh_battery()
         self._refresh_network()
         self._refresh_autostart()
+        self._refresh_lid()
         self._set_sensitive(True)
 
         problems = []
@@ -79,6 +82,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self._battery_supported:
             problems.append(translate('{file} is missing, the charge threshold is '
                                       'unavailable', file=core.BATTERY_THRESHOLD_FILE))
+        if not self._lid_supported:
+            problems.append(translate('systemd-logind does not answer, the lid settings '
+                                      'are unavailable'))
         if problems:
             self._set_status(
                 translate('Unavailable: {problems}.', problems='; '.join(problems)),
@@ -465,6 +471,119 @@ class MainWindow(Gtk.ApplicationWindow):
         self._network_apps.append(grid)
 
     # ------------------------------------------------------------------
+    # layout: lid
+    # ------------------------------------------------------------------
+
+    def _build_lid_tab(self) -> Gtk.Widget:
+        scroller = self._scroller()
+        content = self._page()
+        content.append(self._build_lid_live())
+        content.append(self._build_lid_battery(scroller))
+        content.append(self._build_lid_ac())
+        content.append(self._build_lid_actions())
+        content.append(self._hint(translate(
+            'While an external monitor is connected these settings do not apply: the '
+            'laptop counts as docked, and the row "With an external monitor" shows '
+            'what happens then.'
+        )))
+        content.append(self._hint(translate(
+            'An awake laptop with its lid closed cools worse — do not carry it in a bag '
+            'like that.'
+        )))
+        scroller.set_child(content)
+        return scroller
+
+    def _build_lid_live(self) -> Gtk.Widget:
+        grid = self._grid()
+
+        self._lid_value = self._value_label()
+        self._lid_source_value = self._value_label()
+        self._lid_battery_value = self._value_label()
+        self._lid_ac_value = self._value_label()
+        self._lid_docked_value = self._value_label()
+
+        rows = (
+            (translate('Lid'), self._lid_value),
+            (translate('Power source'), self._lid_source_value),
+            (translate('On battery'), self._lid_battery_value),
+            (translate('On the adapter'), self._lid_ac_value),
+            (translate('With an external monitor'), self._lid_docked_value),
+        )
+        for row, (title, widget) in enumerate(rows):
+            grid.attach(self._key_label(title), 0, row, 1, 1)
+            grid.attach(widget, 1, row, 1, 1)
+
+        self._lid_blocked = self._hint(translate(
+            'An application holds the lid switch right now (GNOME does so while an '
+            'external monitor is connected), so closing the lid will not put the '
+            'laptop to sleep.'
+        ))
+        self._lid_blocked.set_visible(False)
+        grid.attach(self._lid_blocked, 0, len(rows), 2, 1)
+
+        return self._frame(translate('Right now'), grid)
+
+    def _build_lid_battery(self, scroller: Gtk.ScrolledWindow) -> Gtk.Widget:
+        box = self._section()
+
+        self._lid_battery_drop = self._lid_drop(core.LID_BATTERY_ACTIONS)
+        self._lid_battery_drop.connect('notify::selected', self._on_lid_battery_changed)
+
+        self._lid_low_spin = Gtk.SpinButton.new_with_range(
+            core.MIN_LID_LOW_THRESHOLD, core.MAX_LID_LOW_THRESHOLD, 1
+        )
+        self._lid_low_spin.set_numeric(True)
+        self._disable_wheel(self._lid_low_spin, scroller)
+
+        low_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        low_box.append(Gtk.Label(label=translate('Go to sleep once the charge is down to')))
+        low_box.append(self._lid_low_spin)
+        low_box.append(Gtk.Label(label='%'))
+
+        box.append(self._lid_battery_drop)
+        box.append(low_box)
+        box.append(self._hint(translate(
+            'logind cannot tie the lid to the charge, so in the "only when the charge is '
+            'low" mode it only locks the screen, and the Autostart service checks every '
+            '30 seconds whether the lid is closed on battery and the charge is down to '
+            'this level — Autostart has to be on for that.'
+        )))
+        return self._frame(translate('Lid closed on battery'), box)
+
+    def _build_lid_ac(self) -> Gtk.Widget:
+        box = self._section()
+        self._lid_ac_drop = self._lid_drop(core.LID_AC_ACTIONS)
+        box.append(self._lid_ac_drop)
+        return self._frame(translate('Lid closed on the adapter'), box)
+
+    def _build_lid_actions(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
+        self._lid_apply = Gtk.Button(label=translate('Apply'))
+        self._lid_apply.add_css_class('suggested-action')
+        self._lid_apply.connect('clicked', self._on_lid_apply)
+
+        self._lid_reset = Gtk.Button(label=translate('System default'))
+        self._lid_reset.connect('clicked', self._on_lid_reset)
+
+        box.append(self._lid_apply)
+        box.append(self._lid_reset)
+        return box
+
+    @staticmethod
+    def _lid_drop(actions: tuple[str, ...]) -> Gtk.DropDown:
+        """Drop-down with one row per lid action.
+
+        :param actions: identifiers in the order of the rows.
+        """
+        model = Gtk.StringList()
+        for action in actions:
+            model.append(lid.action_label(action))
+        drop = Gtk.DropDown(model=model)
+        drop.set_halign(Gtk.Align.START)
+        return drop
+
+    # ------------------------------------------------------------------
     # layout: the shared bottom of the window
     # ------------------------------------------------------------------
 
@@ -668,12 +787,18 @@ class MainWindow(Gtk.ApplicationWindow):
         for widget in (self._battery_scale, self._battery_apply, self._battery_off):
             widget.set_sensitive(battery_ready)
 
+        lid_ready = sensitive and self._lid_supported
+        for widget in (self._lid_battery_drop, self._lid_ac_drop,
+                       self._lid_apply, self._lid_reset):
+            widget.set_sensitive(lid_ready)
+        self._update_lid_low()
+
         # the audit does not depend on ASUS hardware, but is locked while measuring
         self._set_power_busy(self._analysis_running or not sensitive)
 
         self._autostart_switch.set_sensitive(
             sensitive and core.autostart_installed()
-            and (self._supported or self._battery_supported)
+            and (self._supported or self._battery_supported or self._lid_supported)
         )
 
     def _set_power_busy(self, busy: bool) -> None:
@@ -710,8 +835,10 @@ class MainWindow(Gtk.ApplicationWindow):
             spin_temp.set_value(temp)
             spin_pwm.set_value(pwm)
         self._battery_scale.set_value(self._initial_threshold(config))
+        self._lid_low_spin.set_value(config.lid_low_threshold)
         self._suppress = False
 
+        self._set_lid_editors(*self._initial_lid(config))
         self._update_effective()
         self._update_threshold_preview()
 
@@ -727,6 +854,40 @@ class MainWindow(Gtk.ApplicationWindow):
         if current is not None and current < 100:
             return current
         return core.DEFAULT_BATTERY_THRESHOLD
+
+    @staticmethod
+    def _initial_lid(config: core.Config) -> tuple[str, str]:
+        """What the lid editors show: saved, or what logind does now.
+
+        :param config: configuration just loaded from disk.
+        """
+        if config.lid_enabled:
+            return config.lid_battery, config.lid_ac
+        state = lid.read_state()
+        if state is None:
+            return core.LID_SUSPEND, core.LID_SUSPEND
+        battery = state.battery if state.battery in core.LID_BATTERY_ACTIONS else core.LID_SUSPEND
+        ac = state.ac if state.ac in core.LID_AC_ACTIONS else core.LID_SUSPEND
+        return battery, ac
+
+    def _set_lid_editors(self, battery: str, ac: str) -> None:
+        """Select the actions in the lid drop-downs.
+
+        :param battery: one of ``core.LID_BATTERY_ACTIONS``.
+        :param ac: one of ``core.LID_AC_ACTIONS``.
+        """
+        self._lid_battery_drop.set_selected(core.LID_BATTERY_ACTIONS.index(battery))
+        self._lid_ac_drop.set_selected(core.LID_AC_ACTIONS.index(ac))
+
+    def _lid_battery_action(self) -> str:
+        return core.LID_BATTERY_ACTIONS[self._lid_battery_drop.get_selected()]
+
+    def _update_lid_low(self) -> None:
+        """The charge to sleep at matters in the low mode only."""
+        self._lid_low_spin.set_sensitive(
+            self._lid_battery_drop.get_sensitive()
+            and self._lid_battery_action() == core.LID_LOW_BATTERY
+        )
 
     def _collect(self) -> tuple[int, list[tuple[int, int]]]:
         floor = int(self._floor_scale.get_value())
@@ -835,13 +996,32 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self._update_threshold_preview()
 
+    def _refresh_lid(self) -> None:
+        state = lid.read_state()
+        if state is None:
+            self._lid_value.set_markup(
+                f'<tt>{translate("systemd-logind does not answer")}</tt>')
+            return
+        rows = (
+            (self._lid_value, translate('closed') if state.closed else translate('open')),
+            (self._lid_source_value,
+             translate('adapter') if state.on_external_power else translate('battery')),
+            (self._lid_battery_value,
+             lid.battery_label(state, core.load_config(), self._autostart_switch.get_active())),
+            (self._lid_ac_value, lid.action_label(state.ac)),
+            (self._lid_docked_value, lid.action_label(state.docked_action)),
+        )
+        for widget, text in rows:
+            widget.set_markup(f'<tt>{GLib.markup_escape_text(text)}</tt>')
+        self._lid_blocked.set_visible(state.blocked)
+
     def _refresh_autostart(self) -> None:
         installed = core.autostart_installed()
         self._suppress = True
         self._autostart_switch.set_active(installed and core.autostart_enabled())
         self._suppress = False
         self._autostart_switch.set_sensitive(
-            installed and (self._supported or self._battery_supported)
+            installed and (self._supported or self._battery_supported or self._lid_supported)
         )
         if not installed:
             self._autostart_switch.set_tooltip_text(translate(
@@ -850,7 +1030,8 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self._autostart_switch.set_tooltip_text(translate(
                 'Restores the curve and the charge threshold after a reboot, after '
-                'resume and after a power profile switch'
+                'resume and after a power profile switch, and puts a laptop with its '
+                'lid closed to sleep at low charge when the Lid tab asks for it'
             ))
 
     def _on_timer(self) -> bool:
@@ -860,6 +1041,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._refresh_network()
         if self._tick % AUTOSTART_EVERY == 0:
             self._refresh_autostart()
+        self._refresh_lid()
         return True
 
     def _refresh_network(self) -> None:
@@ -948,6 +1130,32 @@ class MainWindow(Gtk.ApplicationWindow):
             ['battery', 'off', '-q'],
             translate('Limit lifted — charging up to 100 %'),
             on_success=lambda: self._set_threshold_value(100),
+        )
+
+    def _on_lid_battery_changed(self, _drop: Gtk.DropDown, _param) -> None:
+        self._update_lid_low()
+
+    def _on_lid_apply(self, _button: Gtk.Button) -> None:
+        battery = self._lid_battery_action()
+        ac = core.LID_AC_ACTIONS[self._lid_ac_drop.get_selected()]
+        threshold = self._lid_low_spin.get_value_as_int()
+        success = translate('Lid settings applied: logind reads them from {path}',
+                            path=lid.DROPIN_PATH)
+        if battery == core.LID_LOW_BATTERY and not self._autostart_switch.get_active():
+            success += '\n' + translate(
+                'Autostart is off, and without it the laptop never goes to sleep at low '
+                'charge — switch it on below.'
+            )
+        self._run_privileged(
+            ['lid', 'set', '--battery', battery, '--ac', ac, '--low', str(threshold), '-q'],
+            success,
+        )
+
+    def _on_lid_reset(self, _button: Gtk.Button) -> None:
+        self._run_privileged(
+            ['lid', 'off', '-q'],
+            translate('The lid is back to the system defaults'),
+            on_success=lambda: self._set_lid_editors(*self._initial_lid(core.load_config())),
         )
 
     def _on_first_analysis(self) -> bool:
@@ -1093,6 +1301,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._refresh_live()
         self._refresh_battery()
         self._refresh_autostart()
+        self._refresh_lid()
         return False
 
 

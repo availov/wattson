@@ -14,6 +14,8 @@ if [ -x /usr/local/bin/wattson ]; then
     /usr/local/bin/wattson reset || true
     # otherwise the battery would keep its limit forever once the program is gone
     /usr/local/bin/wattson battery off || true
+    # deletes the logind drop-in and has logind reload the defaults
+    /usr/local/bin/wattson lid off || true
 fi
 
 rm -f /usr/local/bin/wattson \
@@ -21,7 +23,8 @@ rm -f /usr/local/bin/wattson \
       /etc/systemd/system/wattson.timer \
       /usr/share/polkit-1/actions/com.yura.wattson.policy \
       /usr/share/applications/wattson.desktop \
+      /etc/systemd/logind.conf.d/wattson.conf \
       /etc/wattson.json
 
 systemctl daemon-reload
-echo "removed: the fan curve is back to factory, charging goes up to 100 % again"
+echo "removed: the fan curve is back to factory, charging goes up to 100 % again, the lid follows the system defaults"

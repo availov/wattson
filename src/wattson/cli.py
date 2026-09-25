@@ -195,11 +195,19 @@ def cmd_apply(args: argparse.Namespace) -> int:
     config = core.load_config()
 
     if args.from_config:
+        # the lid goes first: a failure further down must not keep a laptop
+        # with its lid closed awake until the battery is flat
+        if config.lid_enabled and config.lid_battery == core.LID_LOW_BATTERY:
+            from . import lid
+
+            if lid.sleep_if_low(config.lid_low_threshold) and not args.quiet:
+                print(translate('the lid is closed and the charge is low — going to sleep'))
+
         # service mode: curve and charge threshold are restored independently,
         # a missing subsystem must not take the other one down
         restored = []
-        if config.enabled and core.apply_curve(config.floor_pct, config.points,
-                                               force=args.force):
+        if (config.enabled and core.supported()
+                and core.apply_curve(config.floor_pct, config.points, force=args.force)):
             restored.append(translate('curve, floor {value} %', value=config.floor_pct))
         if (config.battery_enabled and core.battery_supported()
                 and core.apply_battery(config.battery_threshold, force=args.force)):
@@ -302,6 +310,89 @@ def cmd_battery(args: argparse.Namespace) -> int:
         else:
             print(translate('charge threshold {value} %', value=threshold)
                   + ('' if changed else translate(', it was already set')))
+    return 0
+
+
+def cmd_lid(args: argparse.Namespace) -> int:
+    """Show, set or reset what closing the lid does.
+
+    :param args: parsed ``lid`` subcommand.
+    """
+    from . import lid
+
+    if args.action == 'show':
+        state = lid.read_state()
+        if state is None:
+            if args.json:
+                print(json.dumps({'supported': False}, ensure_ascii=False))
+            else:
+                print(translate('Lid: systemd-logind does not answer — the lid settings '
+                                'are unavailable'))
+            return 1
+
+        config = core.load_config()
+        if args.json:
+            payload = {
+                'supported': True,
+                **state.to_dict(),
+                'config': {
+                    'lid_enabled': config.lid_enabled,
+                    'lid_battery': config.lid_battery,
+                    'lid_ac': config.lid_ac,
+                    'lid_low_threshold': config.lid_low_threshold,
+                },
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return 0
+
+        _print_rows([
+            (translate('Lid'), translate('closed') if state.closed else translate('open')),
+            (translate('Power source'),
+             translate('adapter') if state.on_external_power else translate('battery')),
+            (translate('On battery'),
+             lid.battery_label(state, config, core.autostart_enabled())),
+            (translate('On the adapter'), lid.action_label(state.ac)),
+            (translate('With an external monitor'), lid.action_label(state.docked_action)),
+        ])
+        if state.blocked:
+            print()
+            print(translate(
+                'An application holds the lid switch right now (GNOME does so while an '
+                'external monitor is connected), so closing the lid will not put the '
+                'laptop to sleep.'
+            ))
+        return 0
+
+    if args.action == 'off':
+        lid.reset()
+        config = core.load_config()
+        config.lid_enabled = False
+        core.save_config(config)
+        if not args.quiet:
+            print(translate('the lid is back to the system defaults'))
+        return 0
+
+    config = core.load_config()
+    battery = args.battery or config.lid_battery
+    ac = args.ac or config.lid_ac
+    threshold = config.lid_low_threshold if args.low is None else args.low
+    core.validate_lid_threshold(threshold)
+
+    lid.apply(battery, ac)
+    config.lid_enabled = True
+    config.lid_battery = battery
+    config.lid_ac = ac
+    config.lid_low_threshold = threshold
+    core.save_config(config)
+
+    if not args.quiet:
+        _print_rows([
+            (translate('On battery'), lid.setting_label(battery, threshold)),
+            (translate('On the adapter'), lid.action_label(ac)),
+        ])
+        if battery == core.LID_LOW_BATTERY and not core.autostart_enabled():
+            print(translate('autostart is off, and without it the laptop never goes to '
+                            'sleep at low charge: wattson autostart on'))
     return 0
 
 
@@ -497,6 +588,26 @@ def build_parser() -> argparse.ArgumentParser:
     battery.add_argument('--json', action='store_true',
                          help=translate('machine readable output for show'))
 
+    lid_cmd = sub.add_parser('lid', parents=[common],
+                             help=translate('what closing the lid does'))
+    lid_cmd.add_argument('action', nargs='?', choices=['show', 'set', 'off'],
+                         default='show',
+                         help=translate(
+                             'show — state, set — change it, off — back to the system '
+                             'defaults (set and off need root)'))
+    lid_cmd.add_argument('--battery', choices=core.LID_BATTERY_ACTIONS,
+                         help=translate(
+                             'on battery; {mode} sleeps only once the charge is down '
+                             'to --low', mode=core.LID_LOW_BATTERY))
+    lid_cmd.add_argument('--ac', choices=core.LID_AC_ACTIONS,
+                         help=translate('on the adapter'))
+    lid_cmd.add_argument('--low', type=int, metavar='PERCENT',
+                         help=translate('charge to sleep at, {minimum}–{maximum}',
+                                        minimum=core.MIN_LID_LOW_THRESHOLD,
+                                        maximum=core.MAX_LID_LOW_THRESHOLD))
+    lid_cmd.add_argument('--json', action='store_true',
+                         help=translate('machine readable output for show'))
+
     power_cmd = sub.add_parser('power', parents=[common],
                                help=translate('audit of the power consumers'))
     power_cmd.add_argument('--seconds', type=float, default=4.0, metavar='SECONDS',
@@ -537,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
     needs_root = command in PRIVILEGED_COMMANDS or (
         command == 'autostart' and args.action in ('on', 'off')
     ) or (command == 'config' and args.action == 'init') or (
-        command == 'battery' and args.action in ('set', 'off')
+        command in ('battery', 'lid') and args.action in ('set', 'off')
     )
 
     if needs_root and not core.is_root():
@@ -549,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
         'apply': cmd_apply,
         'reset': cmd_reset,
         'battery': cmd_battery,
+        'lid': cmd_lid,
         'power': cmd_power,
         'net': cmd_net,
         'autostart': cmd_autostart,

@@ -8,8 +8,8 @@
        carrying xml:lang="xx", using the same language codes as the message
        catalogs in src/wattson/locales. -->
   <action id="com.yura.wattson.manage">
-    <description>Manage fan curve and battery charge limit</description>
-    <message>Authentication is required to change fan and battery settings</message>
+    <description>Manage fan curve, battery charge limit and lid behaviour</description>
+    <message>Authentication is required to change fan, battery and lid settings</message>
     <icon_name>applications-system</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
